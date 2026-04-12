@@ -16,7 +16,7 @@ app.add_middleware(
 )
 
 SIMULATIONS = 1000
-MAX_TRADES = 1000
+MAX_TRADES = 300  # 🔥 limitado (clave)
 
 
 # ==============================
@@ -44,7 +44,7 @@ class FreeRequest(BaseModel):
 def normalize_config(cfg):
     return {
         "initial_balance": cfg["initial_balance"],
-        "target_pct": cfg["target_pct"] / 100,
+        "target_pct": (cfg["target_pct"] / 100) * 1.1,  # 🔥 más difícil
         "max_dd_pct": cfg["max_dd_pct"] / 100 if cfg.get("max_dd_pct") else None,
         "daily_dd_pct": cfg["daily_dd_pct"] / 100 if cfg.get("daily_dd_pct") else None,
         "min_days": cfg.get("min_days"),
@@ -57,7 +57,7 @@ def normalize_winrate(w):
 
 
 # ==============================
-# CORE SIMULATION (FIXED)
+# CORE SIMULATION
 # ==============================
 
 def run_simulation(winrate, rr, risk, cfg):
@@ -78,24 +78,26 @@ def run_simulation(winrate, rr, risk, cfg):
         else:
             r = -1
 
-        # 🔥 más volatilidad
+        # 🔥 volatilidad real
         noise = np.random.normal(0, 0.3)
-        r = r + noise
+        r += noise
 
-        # 🔥 riesgo no lineal
-        risk_factor = (risk / 100) ** 1.3
+        # 🔥 impacto directo del riesgo
+        risk_factor = (risk / 100)
 
         balance *= (1 + risk_factor * r)
 
-        # 🔥 penalización riesgo alto
-        if risk > 1.0:
-            balance *= (1 - (risk - 1.0) * 0.002)
+        # 🔥 fricción temporal (clave sin límite de días)
+        balance *= 0.9995
+
+        # 🔥 castigo riesgo alto
+        if risk > 1.2:
+            balance *= (1 - (risk - 1.2) * 0.003)
 
         if balance <= 0:
             return "fail", days, dd_track, balance
 
         peak = max(peak, balance)
-
         dd = (balance - peak) / peak
         dd_track.append(dd)
 
@@ -145,49 +147,23 @@ def monte_carlo(winrate, rr, risk, cfg):
 
     s = pd.Series(outcomes)
 
-    pass_rate = float((s == "pass").mean())
-    profitable_rate = float(
-        sum(1 for b in end_balances if b > cfg["initial_balance"]) / SIMULATIONS
-    )
-    dd_fail_rate = float((s == "fail").mean())
-    avg_days = float(np.mean(days_list))
-
     return {
-        "pass_rate": pass_rate,
-        "avg_days": avg_days,
+        "pass_rate": float((s == "pass").mean()),
+        "avg_days": float(np.mean(days_list)),
         "max_dd_p95": float(np.percentile(dd_all, 95)),
-        "profitable_rate": profitable_rate,
+        "profitable_rate": float(
+            sum(1 for b in end_balances if b > cfg["initial_balance"]) / SIMULATIONS
+        ),
         "expected_return": float(
             np.mean(end_balances) / cfg["initial_balance"] - 1
         ),
         "avg_progress": float(np.mean(end_balances) / target),
-        "dd_fail_rate": dd_fail_rate,
+        "dd_fail_rate": float((s == "fail").mean()),
     }
 
 
 # ==============================
-# INTELLIGENCE
-# ==============================
-
-def generate_message(stats):
-
-    if stats["pass_rate"] > 0.6:
-        return "Favorable conditions to pass challenge"
-
-    if stats["pass_rate"] < 0.1 and stats["profitable_rate"] > 0.6:
-        return "Profitable strategy but unlikely to pass challenge"
-
-    if stats["profitable_rate"] < 0.5:
-        return "Strategy lacks edge"
-
-    if stats["avg_progress"] > 0.75:
-        return "Good progress but constraints are limiting performance"
-
-    return "Moderate performance under current constraints"
-
-
-# ==============================
-# FREE ENDPOINT
+# FREE ENDPOINT (MEJORADO)
 # ==============================
 
 @app.post("/simulate/free")
@@ -197,10 +173,10 @@ def simulate_free(req: FreeRequest):
     cfg = normalize_config(req.dict())
 
     stats = monte_carlo(winrate, req.rr, req.risk, cfg)
-    message = generate_message(stats)
 
     edge = (winrate * req.rr) - (1 - winrate)
 
+    # 🔥 curva REALISTA (no random simple)
     balance = req.initial_balance
     curve = [balance]
 
@@ -210,63 +186,68 @@ def simulate_free(req: FreeRequest):
         else:
             r = -1
 
+        r += np.random.normal(0, 0.3)
+
         balance *= (1 + (req.risk / 100) * r)
+        balance *= 0.9995  # 🔥 misma fricción
+
         curve.append(balance)
 
     return {
         "profiles": [
             {
-                "name": "quick",
+                "name": "standard",
                 "pass_rate": round(stats["pass_rate"] * 100, 2),
                 "risk": req.risk,
-                "message": message,
                 "edge": round(edge * 100, 2),
                 "stats": stats,
                 "mc_curves": {
                     "p50": curve
                 }
             }
-        ],
-        "optimal_risk": req.risk
+        ]
     }
 
 
 # ==============================
-# OPTIMIZE ENDPOINT
+# OPTIMIZE (3 PERFILES REALES)
 # ==============================
 
 @app.post("/optimize")
 def optimize(req: FreeRequest):
 
     winrate = normalize_winrate(req.winrate)
-    base_cfg = normalize_config(req.dict())
+    cfg = normalize_config(req.dict())
 
-    risks = np.arange(0.25, 2.25, 0.25)
+    risk_levels = {
+        "low": 0.5,
+        "mid": 1.0,
+        "high": 1.5,
+    }
 
     results = []
 
-    for r in risks:
-        stats = monte_carlo(winrate, req.rr, r, base_cfg)
+    for name, r in risk_levels.items():
+        stats = monte_carlo(winrate, req.rr, r, cfg)
 
         results.append({
-            "risk": round(r, 2),
+            "name": name,
+            "risk": r,
             "pass_rate": stats["pass_rate"],
             "avg_days": stats["avg_days"],
             "max_dd": stats["max_dd_p95"],
             "dd_fail_rate": stats["dd_fail_rate"],
-            "stats": stats
         })
 
     def score(x):
         return (
-            x["pass_rate"] * 0.7
-            - x["dd_fail_rate"] * 0.5
-            - (x["avg_days"] / 100)
+            x["pass_rate"] * 0.6
+            - x["dd_fail_rate"] * 0.7
+            - (x["avg_days"] / 50)
         )
 
     best = max(results, key=score)
 
-    winrate = normalize_winrate(req.winrate)
     edge = (winrate * req.rr) - (1 - winrate)
 
     return {
@@ -275,14 +256,13 @@ def optimize(req: FreeRequest):
             "pass_rate": round(best["pass_rate"] * 100, 2),
             "avg_days": round(best["avg_days"], 1),
             "max_dd": round(best["max_dd"] * 100, 2),
-            "dd_fail_rate": round(best["dd_fail_rate"] * 100, 2),
             "edge": round(edge * 100, 2)
         },
         "all_results": [
             {
+                "name": r["name"],
                 "risk": r["risk"],
                 "pass_rate": round(r["pass_rate"] * 100, 2),
-                "avg_days": round(r["avg_days"], 1)
             }
             for r in results
         ]
