@@ -15,7 +15,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 🔥 AUMENTADO (ANTES 50)
 SIMULATIONS = 1000
 MAX_TRADES = 1000
 
@@ -79,12 +78,18 @@ def run_simulation(winrate, rr, risk, cfg):
         else:
             r = -1
 
-        # 🔥 ruido realista
-        noise = np.random.normal(0, 0.15)
+        # 🔥 más volatilidad
+        noise = np.random.normal(0, 0.3)
         r = r + noise
 
-        # aplicar retorno
-        balance *= (1 + (risk / 100) * r)
+        # 🔥 riesgo no lineal
+        risk_factor = (risk / 100) ** 1.3
+
+        balance *= (1 + risk_factor * r)
+
+        # 🔥 penalización riesgo alto
+        if risk > 1.0:
+            balance *= (1 - (risk - 1.0) * 0.002)
 
         if balance <= 0:
             return "fail", days, dd_track, balance
@@ -94,11 +99,9 @@ def run_simulation(winrate, rr, risk, cfg):
         dd = (balance - peak) / peak
         dd_track.append(dd)
 
-        # MAX DD
         if cfg["max_dd_pct"] and dd <= -cfg["max_dd_pct"]:
             return "fail", days, dd_track, balance
 
-        # DAILY DD
         if cfg["daily_dd_pct"]:
             if (balance - day_start) / day_start <= -cfg["daily_dd_pct"]:
                 return "fail", days, dd_track, balance
@@ -110,12 +113,10 @@ def run_simulation(winrate, rr, risk, cfg):
             days += 1
             day_start = balance
 
-        # PASS
         if balance >= target:
             if not cfg["min_days"] or days >= cfg["min_days"]:
                 return "pass", days, dd_track, balance
 
-        # TIMEOUT
         if cfg["max_days"] and days >= cfg["max_days"]:
             return "timeout", days, dd_track, balance
 
@@ -123,7 +124,7 @@ def run_simulation(winrate, rr, risk, cfg):
 
 
 # ==============================
-# MONTE CARLO (FIXED)
+# MONTE CARLO
 # ==============================
 
 def monte_carlo(winrate, rr, risk, cfg):
@@ -200,7 +201,6 @@ def simulate_free(req: FreeRequest):
 
     edge = (winrate * req.rr) - (1 - winrate)
 
-    # 🔥 curva simple para UI
     balance = req.initial_balance
     curve = [balance]
 
@@ -232,7 +232,7 @@ def simulate_free(req: FreeRequest):
 
 
 # ==============================
-# OPTIMIZE ENDPOINT 🔥
+# OPTIMIZE ENDPOINT
 # ==============================
 
 @app.post("/optimize")
