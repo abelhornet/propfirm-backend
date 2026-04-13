@@ -199,26 +199,23 @@ def simulate_free(req: FreeRequest):
 # ==============================
 # OPTIMIZE
 # ==============================
-
 @app.post("/optimize")
 def optimize(req: FreeRequest):
 
     winrate = normalize_winrate(req.winrate)
     cfg = normalize_config(req.dict())
 
-    risk_levels = {
-        "low": 0.5,
-        "mid": 1.0,
-        "high": 1.5,
-    }
+    # =========================
+    # 1. GRID SEARCH REAL
+    # =========================
+    risk_grid = np.linspace(0.25, 2.5, 12)
 
-    results = []
+    raw_results = []
 
-    for name, r in risk_levels.items():
+    for r in risk_grid:
         stats = monte_carlo(winrate, req.rr, r, cfg)
 
-        results.append({
-            "name": name,
+        raw_results.append({
             "risk": r,
             "pass_rate": stats["pass_rate"],
             "avg_days": stats["avg_days"],
@@ -226,45 +223,55 @@ def optimize(req: FreeRequest):
             "dd_fail_rate": stats["dd_fail_rate"],
         })
 
+    # =========================
+    # 2. SCORING
+    # =========================
     def score(x):
         return (
             x["pass_rate"] * 0.6
-            - x["dd_fail_rate"] * 0.7
+            - x["dd_fail_rate"] * 0.8
             - (x["avg_days"] / 50)
+            - abs(x["max_dd"]) * 0.3
         )
 
-    best = max(results, key=score)
+    best = max(raw_results, key=score)
+    optimal_risk = best["risk"]
 
-    # 🔥 NUEVO → curva del mejor risk
-    balance = req.initial_balance
-    optimal_curve = [balance]
+    # =========================
+    # 3. PERFILES DINÁMICOS
+    # =========================
+    profile_risks = {
+        "low": max(0.25, optimal_risk * 0.6),
+        "mid": optimal_risk,
+        "high": min(3.0, optimal_risk * 1.4),
+    }
 
-    for _ in range(150):
-        r = req.rr if np.random.rand() < winrate else -1
-        r += np.random.normal(0, 0.3)
+    final_profiles = []
 
-        balance *= (1 + (best["risk"] / 100) * r)
-        balance *= 0.9995
+    for name, r in profile_risks.items():
+        stats = monte_carlo(winrate, req.rr, r, cfg)
 
-        optimal_curve.append(balance)
+        final_profiles.append({
+            "name": name,
+            "risk": round(r, 2),
+            "pass_rate": round(stats["pass_rate"] * 100, 2),
+        })
 
+    # =========================
+    # 4. EDGE
+    # =========================
     edge = (winrate * req.rr) - (1 - winrate)
 
+    # =========================
+    # 5. RESPONSE FINAL
+    # =========================
     return {
         "optimal": {
-            "risk": best["risk"],
+            "risk": round(optimal_risk, 2),
             "pass_rate": round(best["pass_rate"] * 100, 2),
             "avg_days": round(best["avg_days"], 1),
             "max_dd": round(best["max_dd"] * 100, 2),
             "edge": round(edge * 100, 2)
         },
-        "all_results": [
-            {
-                "name": r["name"],
-                "risk": r["risk"],
-                "pass_rate": round(r["pass_rate"] * 100, 2),
-            }
-            for r in results
-        ],
-        "optimal_curve": optimal_curve  # 🔥 CLAVE
+        "all_results": final_profiles
     }
