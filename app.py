@@ -16,7 +16,7 @@ app.add_middleware(
 )
 
 SIMULATIONS = 1000
-MAX_TRADES = 300  # 🔥 limitado (clave)
+MAX_TRADES = 300
 
 
 # ==============================
@@ -44,7 +44,7 @@ class FreeRequest(BaseModel):
 def normalize_config(cfg):
     return {
         "initial_balance": cfg["initial_balance"],
-        "target_pct": (cfg["target_pct"] / 100) * 1.1,  # 🔥 más difícil
+        "target_pct": (cfg["target_pct"] / 100) * 1.1,
         "max_dd_pct": cfg["max_dd_pct"] / 100 if cfg.get("max_dd_pct") else None,
         "daily_dd_pct": cfg["daily_dd_pct"] / 100 if cfg.get("daily_dd_pct") else None,
         "min_days": cfg.get("min_days"),
@@ -73,24 +73,16 @@ def run_simulation(winrate, rr, risk, cfg):
 
     for _ in range(MAX_TRADES):
 
-        if np.random.rand() < winrate:
-            r = rr
-        else:
-            r = -1
+        r = rr if np.random.rand() < winrate else -1
+        r += np.random.normal(0, 0.3)
 
-        # 🔥 volatilidad real
-        noise = np.random.normal(0, 0.3)
-        r += noise
-
-        # 🔥 impacto directo del riesgo
         risk_factor = (risk / 100)
-
         balance *= (1 + risk_factor * r)
 
-        # 🔥 fricción temporal (clave sin límite de días)
+        # fricción
         balance *= 0.9995
 
-        # 🔥 castigo riesgo alto
+        # penalización riesgo alto
         if risk > 1.2:
             balance *= (1 - (risk - 1.2) * 0.003)
 
@@ -163,7 +155,7 @@ def monte_carlo(winrate, rr, risk, cfg):
 
 
 # ==============================
-# FREE ENDPOINT (MEJORADO)
+# FREE
 # ==============================
 
 @app.post("/simulate/free")
@@ -176,20 +168,15 @@ def simulate_free(req: FreeRequest):
 
     edge = (winrate * req.rr) - (1 - winrate)
 
-    # 🔥 curva REALISTA (no random simple)
     balance = req.initial_balance
     curve = [balance]
 
     for _ in range(150):
-        if np.random.rand() < winrate:
-            r = req.rr
-        else:
-            r = -1
-
+        r = req.rr if np.random.rand() < winrate else -1
         r += np.random.normal(0, 0.3)
 
         balance *= (1 + (req.risk / 100) * r)
-        balance *= 0.9995  # 🔥 misma fricción
+        balance *= 0.9995
 
         curve.append(balance)
 
@@ -210,7 +197,7 @@ def simulate_free(req: FreeRequest):
 
 
 # ==============================
-# OPTIMIZE (3 PERFILES REALES)
+# OPTIMIZE
 # ==============================
 
 @app.post("/optimize")
@@ -248,6 +235,19 @@ def optimize(req: FreeRequest):
 
     best = max(results, key=score)
 
+    # 🔥 NUEVO → curva del mejor risk
+    balance = req.initial_balance
+    optimal_curve = [balance]
+
+    for _ in range(150):
+        r = req.rr if np.random.rand() < winrate else -1
+        r += np.random.normal(0, 0.3)
+
+        balance *= (1 + (best["risk"] / 100) * r)
+        balance *= 0.9995
+
+        optimal_curve.append(balance)
+
     edge = (winrate * req.rr) - (1 - winrate)
 
     return {
@@ -265,5 +265,6 @@ def optimize(req: FreeRequest):
                 "pass_rate": round(r["pass_rate"] * 100, 2),
             }
             for r in results
-        ]
+        ],
+        "optimal_curve": optimal_curve  # 🔥 CLAVE
     }
