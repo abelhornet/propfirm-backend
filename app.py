@@ -48,7 +48,7 @@ def normalize_config(cfg):
         "max_dd_pct": cfg["max_dd_pct"] / 100 if cfg.get("max_dd_pct") else None,
         "daily_dd_pct": cfg["daily_dd_pct"] / 100 if cfg.get("daily_dd_pct") else None,
         "min_days": cfg.get("min_days"),
-        "max_days": cfg.get("max_days"),
+        "max_days": cfg.get("max_days") if cfg.get("max_days") else 999,  # 🔥 FIX
     }
 
 
@@ -168,17 +168,8 @@ def simulate_free(req: FreeRequest):
 
     edge = (winrate * req.rr) - (1 - winrate)
 
-    balance = req.initial_balance
-    curve = [balance]
-
-    for _ in range(150):
-        r = req.rr if np.random.rand() < winrate else -1
-        r += np.random.normal(0, 0.3)
-
-        balance *= (1 + (req.risk / 100) * r)
-        balance *= 0.9995
-
-        curve.append(balance)
+    # 🔥 dinero real por trade
+    risk_amount = req.initial_balance * (req.risk / 100)
 
     return {
         "profiles": [
@@ -186,19 +177,18 @@ def simulate_free(req: FreeRequest):
                 "name": "standard",
                 "pass_rate": round(stats["pass_rate"] * 100, 2),
                 "risk": req.risk,
+                "risk_amount": round(risk_amount, 2),  # 🔥 NUEVO
                 "edge": round(edge * 100, 2),
                 "stats": stats,
-                "mc_curves": {
-                    "p50": curve
-                }
             }
         ]
     }
 
 
 # ==============================
-# OPTIMIZE
+# OPTIMIZE (PRO)
 # ==============================
+
 @app.post("/optimize")
 def optimize(req: FreeRequest):
 
@@ -254,6 +244,7 @@ def optimize(req: FreeRequest):
         final_profiles.append({
             "name": name,
             "risk": round(r, 2),
+            "risk_amount": round(req.initial_balance * (r / 100), 2),  # 🔥 NUEVO
             "pass_rate": round(stats["pass_rate"] * 100, 2),
         })
 
@@ -268,6 +259,7 @@ def optimize(req: FreeRequest):
     return {
         "optimal": {
             "risk": round(optimal_risk, 2),
+            "risk_amount": round(req.initial_balance * (optimal_risk / 100), 2),  # 🔥 NUEVO
             "pass_rate": round(best["pass_rate"] * 100, 2),
             "avg_days": round(best["avg_days"], 1),
             "max_dd": round(best["max_dd"] * 100, 2),
