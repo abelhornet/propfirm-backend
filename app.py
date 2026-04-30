@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 import numpy as np
 import pandas as pd
@@ -24,9 +24,11 @@ MAX_TRADES = 300
 # ==============================
 
 class FreeRequest(BaseModel):
-    winrate: float
-    rr: float
-    risk: float
+    winrate: float = Field(..., gt=0, lt=1.0)
+    rr: float = Field(..., gt=0)
+    risk: float = Field(..., gt=0, lt=3)
+
+    rr_std: float = 0.3
 
     initial_balance: float = 10000
     target_pct: float = 8
@@ -48,7 +50,7 @@ def normalize_config(cfg):
         "max_dd_pct": cfg["max_dd_pct"] / 100 if cfg.get("max_dd_pct") else None,
         "daily_dd_pct": cfg["daily_dd_pct"] / 100 if cfg.get("daily_dd_pct") else None,
         "min_days": cfg.get("min_days"),
-        "max_days": cfg.get("max_days") if cfg.get("max_days") else 999,  # 🔥 FIX
+        "max_days": cfg.get("max_days") if cfg.get("max_days") else 999,
     }
 
 
@@ -60,7 +62,7 @@ def normalize_winrate(w):
 # CORE SIMULATION
 # ==============================
 
-def run_simulation(winrate, rr, risk, cfg):
+def run_simulation(winrate, rr, risk, rr_std, cfg):
     balance = cfg["initial_balance"]
     peak = balance
     target = balance * (1 + cfg["target_pct"])
@@ -74,7 +76,7 @@ def run_simulation(winrate, rr, risk, cfg):
     for _ in range(MAX_TRADES):
 
         r = rr if np.random.rand() < winrate else -1
-        r += np.random.normal(0, 0.3)
+        r += np.random.normal(0, rr_std)
 
         risk_factor = (risk / 100)
         balance *= (1 + risk_factor * r)
@@ -83,8 +85,8 @@ def run_simulation(winrate, rr, risk, cfg):
         balance *= 0.9995
 
         # penalización riesgo alto
-        if risk > 1.2:
-            balance *= (1 - (risk - 1.2) * 0.003)
+        if risk > 1.5:
+            balance *= (1 - (risk - 1.5) * 0.004)
 
         if balance <= 0:
             return "fail", days, dd_track, balance
@@ -121,7 +123,7 @@ def run_simulation(winrate, rr, risk, cfg):
 # MONTE CARLO
 # ==============================
 
-def monte_carlo(winrate, rr, risk, cfg):
+def monte_carlo(winrate, rr, risk, rr_std, cfg):
     outcomes = []
     days_list = []
     dd_all = []
@@ -130,7 +132,7 @@ def monte_carlo(winrate, rr, risk, cfg):
     target = cfg["initial_balance"] * (1 + cfg["target_pct"])
 
     for _ in range(SIMULATIONS):
-        o, d, dd, final_balance = run_simulation(winrate, rr, risk, cfg)
+        o, d, dd, final_balance = run_simulation(winrate, rr, risk, rr_std, cfg)
 
         outcomes.append(o)
         days_list.append(d)
@@ -164,11 +166,11 @@ def simulate_free(req: FreeRequest):
     winrate = normalize_winrate(req.winrate)
     cfg = normalize_config(req.dict())
 
-    stats = monte_carlo(winrate, req.rr, req.risk, cfg)
+    stats = monte_carlo(winrate, req.rr, req.risk, req.rr_std, cfg)
 
     edge = (winrate * req.rr) - (1 - winrate)
+    kelly = edge / req.rr if req.rr != 0 else 0
 
-    # 🔥 dinero real por trade
     risk_amount = req.initial_balance * (req.risk / 100)
 
     return {
@@ -177,8 +179,9 @@ def simulate_free(req: FreeRequest):
                 "name": "standard",
                 "pass_rate": round(stats["pass_rate"] * 100, 2),
                 "risk": req.risk,
-                "risk_amount": round(risk_amount, 2),  # 🔥 NUEVO
+                "risk_amount": round(risk_amount, 2),
                 "edge": round(edge * 100, 2),
+                "kelly": round(kelly, 3),
                 "stats": stats,
             }
         ]
@@ -195,15 +198,12 @@ def optimize(req: FreeRequest):
     winrate = normalize_winrate(req.winrate)
     cfg = normalize_config(req.dict())
 
-    # =========================
-    # 1. GRID SEARCH REAL
-    # =========================
-    risk_grid = np.linspace(0.25, 2.5, 12)
+    risk_grid = np.linspace(0.25, 2.0, 10)
 
     raw_results = []
 
     for r in risk_grid:
-        stats = monte_carlo(winrate, req.rr, r, cfg)
+        stats = monte_carlo(winrate, req.rr, r, req.rr_std, cfg)
 
         raw_results.append({
             "risk": r,
@@ -213,57 +213,47 @@ def optimize(req: FreeRequest):
             "dd_fail_rate": stats["dd_fail_rate"],
         })
 
-    # =========================
-    # 2. SCORING
-    # =========================
     def score(x):
         return (
             x["pass_rate"] * 0.6
-            - x["dd_fail_rate"] * 0.8
-            - (x["avg_days"] / 50)
-            - abs(x["max_dd"]) * 0.3
+            - x["dd_fail_rate"] * 0.9
+            - (x["avg_days"] / 60)
+            - abs(x["max_dd"]) * 0.4
         )
 
     best = max(raw_results, key=score)
     optimal_risk = best["risk"]
 
-    # =========================
-    # 3. PERFILES DINÁMICOS
-    # =========================
     profile_risks = {
         "low": max(0.25, optimal_risk * 0.6),
         "mid": optimal_risk,
-        "high": min(3.0, optimal_risk * 1.4),
+        "high": min(2.5, optimal_risk * 1.4),
     }
 
     final_profiles = []
 
     for name, r in profile_risks.items():
-        stats = monte_carlo(winrate, req.rr, r, cfg)
+        stats = monte_carlo(winrate, req.rr, r, req.rr_std, cfg)
 
         final_profiles.append({
             "name": name,
             "risk": round(r, 2),
-            "risk_amount": round(req.initial_balance * (r / 100), 2),  # 🔥 NUEVO
+            "risk_amount": round(req.initial_balance * (r / 100), 2),
             "pass_rate": round(stats["pass_rate"] * 100, 2),
         })
 
-    # =========================
-    # 4. EDGE
-    # =========================
     edge = (winrate * req.rr) - (1 - winrate)
+    kelly = edge / req.rr if req.rr != 0 else 0
 
-    # =========================
-    # 5. RESPONSE FINAL
-    # =========================
     return {
         "optimal": {
             "risk": round(optimal_risk, 2),
-            "risk_amount": round(req.initial_balance * (optimal_risk / 100), 2),  # 🔥 NUEVO
+            "risk_amount": round(req.initial_balance * (optimal_risk / 100), 2),
             "pass_rate": round(best["pass_rate"] * 100, 2),
             "avg_days": round(best["avg_days"], 1),
             "max_dd": round(best["max_dd"] * 100, 2),
-            "edge": round(edge * 100, 2)
+            "edge": round(edge * 100, 2),
+            "kelly": round(kelly, 3),
         },
         "all_results": final_profiles
     }
