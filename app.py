@@ -20,7 +20,7 @@ MAX_TRADES = 300
 
 
 # ==============================
-# REQUEST MODELS
+# MODELS
 # ==============================
 
 class OptimizeRequest(BaseModel):
@@ -58,7 +58,7 @@ class FreeRequest(BaseModel):
 def normalize_config(cfg):
     return {
         "initial_balance": cfg["initial_balance"],
-        "target_pct": (cfg["target_pct"] / 100) * 1.1,
+        "target_pct": (cfg["target_pct"] / 100),  # ✅ FIX
         "max_dd_pct": cfg["max_dd_pct"] / 100 if cfg.get("max_dd_pct") else None,
         "daily_dd_pct": cfg["daily_dd_pct"] / 100 if cfg.get("daily_dd_pct") else None,
         "min_days": cfg.get("min_days"),
@@ -71,10 +71,10 @@ def normalize_winrate(w):
 
 
 # ==============================
-# CORE SIMULATION (RETURNS)
+# CORE ENGINE (UNIFICADO)
 # ==============================
 
-def run_simulation_returns(returns, risk, cfg):
+def run_simulation(returns, risk, cfg):
     balance = cfg["initial_balance"]
     peak = balance
     target = balance * (1 + cfg["target_pct"])
@@ -91,8 +91,8 @@ def run_simulation_returns(returns, risk, cfg):
 
         balance *= (1 + (risk / 100) * r)
 
-        # fricción
-        balance *= 0.9995
+        # fricción realista
+        balance *= 0.9998
 
         peak = max(peak, balance)
         dd = (balance - peak) / peak
@@ -129,13 +129,13 @@ def run_simulation_returns(returns, risk, cfg):
 # MONTE CARLO
 # ==============================
 
-def monte_carlo_returns(returns, risk, cfg):
+def monte_carlo(returns, risk, cfg):
     outcomes = []
     days_list = []
     dd_all = []
 
     for _ in range(SIMULATIONS):
-        o, d, dd, _ = run_simulation_returns(returns, risk, cfg)
+        o, d, dd, _ = run_simulation(returns, risk, cfg)
 
         outcomes.append(o)
         days_list.append(d)
@@ -168,7 +168,7 @@ def generate_equity_curve(returns, risk, cfg):
 
 
 # ==============================
-# FREE (SIMPLIFIED)
+# FREE (CONVERTIDO A RETURNS)
 # ==============================
 
 @app.post("/simulate/free")
@@ -177,18 +177,21 @@ def simulate_free(req: FreeRequest):
     winrate = normalize_winrate(req.winrate)
     cfg = normalize_config(req.dict())
 
-    def run_simple():
-        balance = cfg["initial_balance"]
-        for _ in range(MAX_TRADES):
-            r = req.rr if np.random.rand() < winrate else -1
-            r += np.random.normal(0, req.rr_std)
-            balance *= (1 + (req.risk / 100) * r)
-        return balance
+    # 🔥 generar distribución sintética
+    returns = []
 
-    passes = 0
-    for _ in range(SIMULATIONS):
-        if run_simple() >= cfg["initial_balance"] * (1 + cfg["target_pct"]):
-            passes += 1
+    for _ in range(1000):
+        if np.random.rand() < winrate:
+            r = req.rr
+        else:
+            r = -1
+
+        r += np.random.normal(0, req.rr_std)
+        returns.append(r)
+
+    returns = np.array(returns)
+
+    stats = monte_carlo(returns, req.risk, cfg)
 
     edge = (winrate * req.rr) - (1 - winrate)
     kelly = edge / req.rr if req.rr != 0 else 0
@@ -197,7 +200,7 @@ def simulate_free(req: FreeRequest):
         "profiles": [
             {
                 "name": "standard",
-                "pass_rate": round((passes / SIMULATIONS) * 100, 2),
+                "pass_rate": round(stats["pass_rate"] * 100, 2),
                 "risk": req.risk,
                 "risk_amount": round(req.initial_balance * (req.risk / 100), 2),
                 "edge": round(edge * 100, 2),
@@ -208,7 +211,7 @@ def simulate_free(req: FreeRequest):
 
 
 # ==============================
-# OPTIMIZE (REAL)
+# OPTIMIZE (REAL DATA)
 # ==============================
 
 @app.post("/optimize")
@@ -218,7 +221,7 @@ def optimize(req: OptimizeRequest):
 
     returns = np.array(req.returns)
 
-    # 🔥 limpieza outliers (muy importante)
+    # limpieza outliers
     returns = np.clip(returns, -5, 5)
 
     # =========================
@@ -229,7 +232,7 @@ def optimize(req: OptimizeRequest):
     results = []
 
     for r in risk_grid:
-        stats = monte_carlo_returns(returns, r, cfg)
+        stats = monte_carlo(returns, r, cfg)
 
         results.append({
             "risk": r,
@@ -240,7 +243,7 @@ def optimize(req: OptimizeRequest):
         })
 
     # =========================
-    # SCORING
+    # SCORE
     # =========================
     def score(x):
         return (
@@ -265,7 +268,7 @@ def optimize(req: OptimizeRequest):
     final_profiles = []
 
     for name, r in profiles.items():
-        stats = monte_carlo_returns(returns, r, cfg)
+        stats = monte_carlo(returns, r, cfg)
 
         final_profiles.append({
             "name": name,
@@ -274,14 +277,7 @@ def optimize(req: OptimizeRequest):
             "pass_rate": round(stats["pass_rate"] * 100, 2),
         })
 
-    # =========================
-    # EQUITY REAL
-    # =========================
-    equity_curve = generate_equity_curve(
-        returns,
-        optimal_risk,
-        cfg
-    )
+    equity_curve = generate_equity_curve(returns, optimal_risk, cfg)
 
     return {
         "optimal": {
