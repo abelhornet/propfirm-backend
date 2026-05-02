@@ -20,7 +20,7 @@ MAX_TRADES = 300
 
 
 # ==============================
-# REQUEST MODEL
+# REQUEST MODELS
 # ==============================
 
 class OptimizeRequest(BaseModel):
@@ -71,7 +71,7 @@ def normalize_winrate(w):
 
 
 # ==============================
-# CORE SIMULATION (RETURNS REAL)
+# CORE SIMULATION (RETURNS)
 # ==============================
 
 def run_simulation_returns(returns, risk, cfg):
@@ -87,7 +87,7 @@ def run_simulation_returns(returns, risk, cfg):
 
     for _ in range(MAX_TRADES):
 
-        r = np.random.choice(returns)  # 🔥 REAL DATA
+        r = np.random.choice(returns)
 
         balance *= (1 + (risk / 100) * r)
 
@@ -126,7 +126,7 @@ def run_simulation_returns(returns, risk, cfg):
 
 
 # ==============================
-# MONTE CARLO REAL
+# MONTE CARLO
 # ==============================
 
 def monte_carlo_returns(returns, risk, cfg):
@@ -152,7 +152,23 @@ def monte_carlo_returns(returns, risk, cfg):
 
 
 # ==============================
-# FREE (SIN CAMBIOS)
+# EQUITY CURVE
+# ==============================
+
+def generate_equity_curve(returns, risk, cfg):
+    balance = cfg["initial_balance"]
+    curve = [balance]
+
+    for _ in range(150):
+        r = np.random.choice(returns)
+        balance *= (1 + (risk / 100) * r)
+        curve.append(balance)
+
+    return curve
+
+
+# ==============================
+# FREE (SIMPLIFIED)
 # ==============================
 
 @app.post("/simulate/free")
@@ -161,7 +177,6 @@ def simulate_free(req: FreeRequest):
     winrate = normalize_winrate(req.winrate)
     cfg = normalize_config(req.dict())
 
-    # modelo simplificado se mantiene aquí
     def run_simple():
         balance = cfg["initial_balance"]
         for _ in range(MAX_TRADES):
@@ -193,7 +208,7 @@ def simulate_free(req: FreeRequest):
 
 
 # ==============================
-# OPTIMIZE (REAL CON CSV)
+# OPTIMIZE (REAL)
 # ==============================
 
 @app.post("/optimize")
@@ -203,7 +218,7 @@ def optimize(req: OptimizeRequest):
 
     returns = np.array(req.returns)
 
-    # 🔥 limpiar datos extremos (opcional pero recomendable)
+    # 🔥 limpieza outliers (muy importante)
     returns = np.clip(returns, -5, 5)
 
     # =========================
@@ -225,7 +240,7 @@ def optimize(req: OptimizeRequest):
         })
 
     # =========================
-    # SCORE
+    # SCORING
     # =========================
     def score(x):
         return (
@@ -239,7 +254,7 @@ def optimize(req: OptimizeRequest):
     optimal_risk = best["risk"]
 
     # =========================
-    # PERFILES 🔥
+    # PROFILES
     # =========================
     profiles = {
         "low": max(0.25, optimal_risk * 0.6),
@@ -259,6 +274,15 @@ def optimize(req: OptimizeRequest):
             "pass_rate": round(stats["pass_rate"] * 100, 2),
         })
 
+    # =========================
+    # EQUITY REAL
+    # =========================
+    equity_curve = generate_equity_curve(
+        returns,
+        optimal_risk,
+        cfg
+    )
+
     return {
         "optimal": {
             "risk": round(optimal_risk, 2),
@@ -267,5 +291,6 @@ def optimize(req: OptimizeRequest):
             "avg_days": round(best["avg_days"], 1),
             "max_dd": round(best["max_dd"] * 100, 2),
         },
-        "all_results": final_profiles
+        "all_results": final_profiles,
+        "equity_curve": equity_curve
     }
