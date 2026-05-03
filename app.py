@@ -15,8 +15,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SIMULATIONS = 1000
+SIMULATIONS = 300
 MAX_TRADES = 300
+TRADES_PER_DAY = 3
 
 
 # ==============================
@@ -58,7 +59,7 @@ class FreeRequest(BaseModel):
 def normalize_config(cfg):
     return {
         "initial_balance": cfg["initial_balance"],
-        "target_pct": (cfg["target_pct"] / 100),  # ✅ FIX
+        "target_pct": cfg["target_pct"] / 100,
         "max_dd_pct": cfg["max_dd_pct"] / 100 if cfg.get("max_dd_pct") else None,
         "daily_dd_pct": cfg["daily_dd_pct"] / 100 if cfg.get("daily_dd_pct") else None,
         "min_days": cfg.get("min_days"),
@@ -71,7 +72,7 @@ def normalize_winrate(w):
 
 
 # ==============================
-# CORE ENGINE (UNIFICADO)
+# CORE ENGINE
 # ==============================
 
 def run_simulation(returns, risk, cfg):
@@ -89,36 +90,43 @@ def run_simulation(returns, risk, cfg):
 
         r = np.random.choice(returns)
 
+        # 🔥 EQUITY UPDATE (R-based)
         balance *= (1 + (risk / 100) * r)
 
-        # fricción realista
+        # ligera fricción
         balance *= 0.9998
 
         peak = max(peak, balance)
         dd = (balance - peak) / peak
         dd_track.append(dd)
 
+        # 💀 cuenta quemada
         if balance <= 0:
             return "fail", days, dd_track, balance
 
+        # 💥 max drawdown
         if cfg["max_dd_pct"] and dd <= -cfg["max_dd_pct"]:
             return "fail", days, dd_track, balance
 
+        # 📉 daily DD
         if cfg["daily_dd_pct"]:
             if (balance - day_start) / day_start <= -cfg["daily_dd_pct"]:
                 return "fail", days, dd_track, balance
 
         trades_today += 1
 
-        if trades_today >= 3:
+        # 📅 avanzar días artificialmente
+        if trades_today >= TRADES_PER_DAY:
             trades_today = 0
             days += 1
             day_start = balance
 
+        # 🎯 target alcanzado
         if balance >= target:
             if not cfg["min_days"] or days >= cfg["min_days"]:
                 return "pass", days, dd_track, balance
 
+        # ⏳ timeout
         if cfg["max_days"] and days >= cfg["max_days"]:
             return "timeout", days, dd_track, balance
 
@@ -168,7 +176,7 @@ def generate_equity_curve(returns, risk, cfg):
 
 
 # ==============================
-# FREE (CONVERTIDO A RETURNS)
+# FREE MODE
 # ==============================
 
 @app.post("/simulate/free")
@@ -177,7 +185,6 @@ def simulate_free(req: FreeRequest):
     winrate = normalize_winrate(req.winrate)
     cfg = normalize_config(req.dict())
 
-    # 🔥 generar distribución sintética
     returns = []
 
     for _ in range(1000):
@@ -211,7 +218,7 @@ def simulate_free(req: FreeRequest):
 
 
 # ==============================
-# OPTIMIZE (REAL DATA)
+# OPTIMIZE (PRO)
 # ==============================
 
 @app.post("/optimize")
@@ -221,8 +228,21 @@ def optimize(req: OptimizeRequest):
 
     returns = np.array(req.returns)
 
-    # limpieza outliers
-    returns = np.clip(returns, -5, 5)
+    # 🔥 LIMPIEZA
+    returns = returns[np.isfinite(returns)]
+    returns = returns[~np.isnan(returns)]
+
+    if len(returns) < 20:
+        return {"error": "Not enough trades"}
+
+    # 🔥 eliminar outliers extremos
+    returns = np.clip(returns, -3, 3)
+
+    print("========== BACKEND DEBUG ==========")
+    print("Trades:", len(returns))
+    print("Sample:", returns[:5])
+    print("Mean R:", np.mean(returns))
+    print("===================================")
 
     # =========================
     # GRID SEARCH
