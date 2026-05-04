@@ -72,6 +72,39 @@ def normalize_winrate(w):
 
 
 # ==============================
+# CONFIDENCE SCORE
+# ==============================
+
+def compute_confidence(returns):
+    n = len(returns)
+
+    if n == 0:
+        return 0.0
+
+    # 📊 sample size component (log scaling)
+    sample_score = min(1.0, np.log10(n + 1) / 2)
+
+    # 📉 variance penalty
+    std = np.std(returns)
+    variance_score = 1 / (1 + std)
+
+    # 📈 signal quality (edge strength)
+    mean = np.mean(returns)
+    signal_score = abs(mean) / (std + 1e-6)
+
+    signal_score = min(signal_score / 2, 1.0)
+
+    # 🔥 combinación
+    confidence = (
+        0.5 * sample_score +
+        0.3 * variance_score +
+        0.2 * signal_score
+    )
+
+    return float(round(confidence, 3))
+
+
+# ==============================
 # CORE ENGINE
 # ==============================
 
@@ -90,43 +123,34 @@ def run_simulation(returns, risk, cfg):
 
         r = np.random.choice(returns)
 
-        # 🔥 EQUITY UPDATE (R-based)
         balance *= (1 + (risk / 100) * r)
-
-        # ligera fricción
         balance *= 0.9998
 
         peak = max(peak, balance)
         dd = (balance - peak) / peak
         dd_track.append(dd)
 
-        # 💀 cuenta quemada
         if balance <= 0:
             return "fail", days, dd_track, balance
 
-        # 💥 max drawdown
         if cfg["max_dd_pct"] and dd <= -cfg["max_dd_pct"]:
             return "fail", days, dd_track, balance
 
-        # 📉 daily DD
         if cfg["daily_dd_pct"]:
             if (balance - day_start) / day_start <= -cfg["daily_dd_pct"]:
                 return "fail", days, dd_track, balance
 
         trades_today += 1
 
-        # 📅 avanzar días artificialmente
         if trades_today >= TRADES_PER_DAY:
             trades_today = 0
             days += 1
             day_start = balance
 
-        # 🎯 target alcanzado
         if balance >= target:
             if not cfg["min_days"] or days >= cfg["min_days"]:
                 return "pass", days, dd_track, balance
 
-        # ⏳ timeout
         if cfg["max_days"] and days >= cfg["max_days"]:
             return "timeout", days, dd_track, balance
 
@@ -176,7 +200,7 @@ def generate_equity_curve(returns, risk, cfg):
 
 
 # ==============================
-# FREE MODE
+# FREE
 # ==============================
 
 @app.post("/simulate/free")
@@ -188,11 +212,7 @@ def simulate_free(req: FreeRequest):
     returns = []
 
     for _ in range(1000):
-        if np.random.rand() < winrate:
-            r = req.rr
-        else:
-            r = -1
-
+        r = req.rr if np.random.rand() < winrate else -1
         r += np.random.normal(0, req.rr_std)
         returns.append(r)
 
@@ -218,7 +238,7 @@ def simulate_free(req: FreeRequest):
 
 
 # ==============================
-# OPTIMIZE (PRO)
+# OPTIMIZE
 # ==============================
 
 @app.post("/optimize")
@@ -228,27 +248,27 @@ def optimize(req: OptimizeRequest):
 
     returns = np.array(req.returns)
 
-    # 🔥 LIMPIEZA
     returns = returns[np.isfinite(returns)]
     returns = returns[~np.isnan(returns)]
 
-    if len(returns) < 20:
-        return {"error": "Not enough trades"}
+    if len(returns) == 0:
+        return {"error": "No valid trades"}
 
-    # 🔥 eliminar outliers extremos
-    returns = np.clip(returns, -3, 3)
+    low_sample = len(returns) < 20
+
+    # 🔥 clipping solo si hay muestra suficiente
+    if len(returns) >= 20:
+        returns = np.clip(returns, -3, 3)
+
+    confidence = compute_confidence(returns)
 
     print("========== BACKEND DEBUG ==========")
     print("Trades:", len(returns))
-    print("Sample:", returns[:5])
-    print("Mean R:", np.mean(returns))
+    print("Mean:", np.mean(returns))
+    print("Confidence:", confidence)
     print("===================================")
 
-    # =========================
-    # GRID SEARCH
-    # =========================
     risk_grid = np.linspace(0.25, 2.0, 10)
-
     results = []
 
     for r in risk_grid:
@@ -262,9 +282,6 @@ def optimize(req: OptimizeRequest):
             "dd_fail_rate": stats["dd_fail_rate"],
         })
 
-    # =========================
-    # SCORE
-    # =========================
     def score(x):
         return (
             x["pass_rate"] * 0.7
@@ -276,9 +293,6 @@ def optimize(req: OptimizeRequest):
     best = max(results, key=score)
     optimal_risk = best["risk"]
 
-    # =========================
-    # PROFILES
-    # =========================
     profiles = {
         "low": max(0.25, optimal_risk * 0.6),
         "mid": optimal_risk,
@@ -308,5 +322,10 @@ def optimize(req: OptimizeRequest):
             "max_dd": round(best["max_dd"] * 100, 2),
         },
         "all_results": final_profiles,
-        "equity_curve": equity_curve
+        "equity_curve": equity_curve,
+
+        # 🔥 NUEVO
+        "confidence": confidence,
+        "low_sample": low_sample,
+        "trades_count": int(len(returns)),
     }
